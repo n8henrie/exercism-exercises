@@ -1,0 +1,8 @@
+.exercism
+.solution.json
+.swiftpm
+.stack-work
+stack.yaml
+stack.yaml.lock
+haskell/*/package.yaml
+*.cabal
