@@ -72,7 +72,7 @@ struct Hand<'a> {
 }
 
 impl FromStr for Rank {
-    type Err = String;
+    type Err = PokerError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         use Rank::*;
         match s {
@@ -89,13 +89,13 @@ impl FromStr for Rank {
             "Q" => Ok(Queen),
             "K" => Ok(King),
             "A" => Ok(Ace),
-            _ => Err(format!("Unrecognized rank: {}", s)),
+            _ => Err(PokerError::BadInput(format!("Unrecognized rank: {}", s))),
         }
     }
 }
 
 impl TryFrom<char> for Suit {
-    type Error = String;
+    type Error = PokerError;
     fn try_from(s: char) -> Result<Self, Self::Error> {
         use Suit::*;
         match s {
@@ -103,13 +103,13 @@ impl TryFrom<char> for Suit {
             'C' => Ok(Clubs),
             'D' => Ok(Diamonds),
             'S' => Ok(Spades),
-            _ => Err(format!("Unrecognized suit: {}", s)),
+            _ => Err(PokerError::BadInput(format!("Unrecognized suit: {}", s))),
         }
     }
 }
 
 impl<'a> TryFrom<&'a str> for Hand<'a> {
-    type Error = String;
+    type Error = PokerError;
     fn try_from(s: &'a str) -> Result<Self, Self::Error> {
         let cards = s
             .split_whitespace()
@@ -119,17 +119,49 @@ impl<'a> TryFrom<&'a str> for Hand<'a> {
                 let suit = word
                     .chars()
                     .last()
-                    .ok_or_else(|| format!("no last character: {}", word))
-                    .and_then(TryInto::try_into)?;
+                    .ok_or_else(|| PokerError::BadInput(format!("no last character: {}", word)))?
+                    .try_into()?;
                 Ok(Card { rank, suit })
             })
             .collect::<Result<Vec<Card>, Self::Error>>()?;
-        let ranking = interpret_hand(cards);
+        let ranking = interpret_hand(cards)?;
         Ok(Self { as_str: s, ranking })
     }
 }
 
-fn interpret_hand(mut cards: Vec<Card>) -> HandRanking {
+#[derive(Debug)]
+enum PokerError {
+    NoneError(&'static str),
+    BadInput(String),
+    ConversionError(std::array::TryFromSliceError),
+}
+
+impl std::fmt::Display for PokerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PokerError::NoneError(s) => write!(f, "{}", s),
+            PokerError::BadInput(s) => write!(f, "{}", s),
+            PokerError::ConversionError(ref e) => e.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for PokerError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            PokerError::NoneError(_) | PokerError::BadInput(_) => None,
+            PokerError::ConversionError(e) => Some(e),
+        }
+    }
+}
+
+impl From<std::array::TryFromSliceError> for PokerError {
+    fn from(err: std::array::TryFromSliceError) -> Self {
+        PokerError::ConversionError(err)
+    }
+}
+
+fn interpret_hand(mut cards: Vec<Card>) -> Result<HandRanking, PokerError> {
     cards.sort();
     let ranks = Hand::ranks(&cards);
 
@@ -137,7 +169,10 @@ fn interpret_hand(mut cards: Vec<Card>) -> HandRanking {
     let (non_singles, singles): (HashMap<_, _>, HashMap<_, _>) =
         ranks.iter().partition(|&(_, &v)| v != 1);
 
-    let highest_count = ranks.iter().max_by_key(|(_, &v)| v).expect("no max");
+    let highest_count = ranks
+        .iter()
+        .max_by_key(|(_, &v)| v)
+        .ok_or_else(|| PokerError::NoneError("no max"))?;
     let mut singles = singles.into_iter().map(|(k, _)| k).collect::<Vec<_>>();
     singles.sort();
 
@@ -147,53 +182,51 @@ fn interpret_hand(mut cards: Vec<Card>) -> HandRanking {
             let two_of = non_singles
                 .into_iter()
                 .find(|&(_, v)| v == 2)
-                .expect("no pair for this full house")
+                .ok_or_else(|| PokerError::BadInput("no pair for this full house".to_string()))?
                 .0;
-            HandRanking::FullHouse(three_of, two_of)
+            Ok(HandRanking::FullHouse(three_of, two_of))
         }
         (2, 2) => {
             let mut v: Vec<_> = non_singles.into_iter().collect();
             v.sort();
             let mut iter = v.into_iter();
-            let small_pair = iter.next().expect("no small rank in vec").0;
-            let large_pair = iter.next().expect("no large rank in vec").0;
+            let small_pair = iter
+                .next()
+                .ok_or_else(|| PokerError::BadInput("no small rank in vec".to_string()))?
+                .0;
+            let large_pair = iter
+                .next()
+                .ok_or_else(|| PokerError::BadInput("no large rank in vec".to_string()))?
+                .0;
             let spare_card = singles[0];
-            HandRanking::TwoPair(large_pair, small_pair, spare_card)
+            Ok(HandRanking::TwoPair(large_pair, small_pair, spare_card))
         }
         (1, 4) => {
             let four_of = *highest_count.0;
             let spare_card = singles[0];
-            HandRanking::FourOfAKind(four_of, spare_card)
+            Ok(HandRanking::FourOfAKind(four_of, spare_card))
         }
         (1, 3) => {
             let three_of = *highest_count.0;
-
-            let spare_cards = singles
-                .as_slice()
-                .try_into()
-                .expect("unable to turn spare cards into array");
-            HandRanking::ThreeOfAKind(three_of, spare_cards)
+            let spare_cards = singles.as_slice().try_into()?;
+            Ok(HandRanking::ThreeOfAKind(three_of, spare_cards))
         }
         (1, 2) => {
             let pair_of = *highest_count.0;
 
-            let spare_cards = singles
-                .as_slice()
-                .try_into()
-                .expect("unable to turn spare cards into array");
-            HandRanking::OnePair(pair_of, spare_cards)
+            let spare_cards = singles.as_slice().try_into()?;
+            Ok(HandRanking::OnePair(pair_of, spare_cards))
         }
         (0, _) => match (Hand::is_flush(&cards), Hand::is_straight(&cards)) {
             (true, true) => {
-                let high_card = *singles.last().expect("no high card in singles");
-                HandRanking::StraightFlush(high_card)
+                let high_card = *singles
+                    .last()
+                    .ok_or_else(|| PokerError::NoneError("no high card in singles"))?;
+                Ok(HandRanking::StraightFlush(high_card))
             }
             (true, false) => {
-                let singles = singles
-                    .as_slice()
-                    .try_into()
-                    .expect("unable to convert flush into array");
-                HandRanking::Flush(singles)
+                let singles = singles.as_slice().try_into()?;
+                Ok(HandRanking::Flush(singles))
             }
             (false, true) => {
                 let is_aces_low_straight =
@@ -201,19 +234,21 @@ fn interpret_hand(mut cards: Vec<Card>) -> HandRanking {
                 let high_card = if is_aces_low_straight {
                     Rank::Five
                 } else {
-                    *singles.last().expect("no last card")
+                    *singles
+                        .last()
+                        .ok_or_else(|| PokerError::NoneError("no high card in singles"))?
                 };
-                HandRanking::Straight(high_card)
+                Ok(HandRanking::Straight(high_card))
             }
             (false, false) => {
-                let singles = singles
-                    .as_slice()
-                    .try_into()
-                    .expect("unable to convert flush into array");
-                HandRanking::HighCard(singles)
+                let singles = singles.as_slice().try_into()?;
+                Ok(HandRanking::HighCard(singles))
             }
         },
-        _ => unreachable!(format!("wrong number of cards: {:?}", cards)),
+        _ => Err(PokerError::BadInput(format!(
+            "wrong number of cards: {:?}",
+            cards
+        ))),
     }
 }
 
@@ -300,19 +335,19 @@ pub fn winning_hands<'a>(hands: &[&'a str]) -> Option<Vec<&'a str>> {
         .collect::<Result<Vec<Hand>, _>>()
     {
         hands.sort();
-        dbg!(&hands);
-        let best = hands.last().expect("no best hand");
-        let winners = hands
-            .iter()
-            .filter_map(|hand| {
-                if hand == best {
-                    Some(hand.as_str)
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-        return Some(winners);
+        if let Some(best) = hands.last() {
+            let winners = hands
+                .iter()
+                .filter_map(|hand| {
+                    if hand == best {
+                        Some(hand.as_str)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            return Some(winners);
+        }
     }
     None
 }
