@@ -89,7 +89,7 @@ impl FromStr for Rank {
             "Q" => Ok(Queen),
             "K" => Ok(King),
             "A" => Ok(Ace),
-            _ => Err(PokerError::BadInput(format!("Unrecognized rank: {}", s))),
+            _ => Err(PokerError::UnknownRank(s.to_owned())),
         }
     }
 }
@@ -103,7 +103,7 @@ impl TryFrom<char> for Suit {
             'C' => Ok(Clubs),
             'D' => Ok(Diamonds),
             'S' => Ok(Spades),
-            _ => Err(PokerError::BadInput(format!("Unrecognized suit: {}", s))),
+            _ => Err(PokerError::UnknownSuit(s)),
         }
     }
 }
@@ -119,20 +119,25 @@ impl<'a> TryFrom<&'a str> for Hand<'a> {
                 let suit = word
                     .chars()
                     .last()
-                    .ok_or_else(|| PokerError::BadInput(format!("no last character: {}", word)))?
+                    .ok_or_else(|| PokerError::MissingData)?
                     .try_into()?;
                 Ok(Card { rank, suit })
             })
             .collect::<Result<Vec<Card>, Self::Error>>()?;
-        let ranking = interpret_hand(cards)?;
-        Ok(Self { as_str: s, ranking })
+        Ok(Self {
+            as_str: s,
+            ranking: interpret_hand(cards)?,
+        })
     }
 }
 
 #[derive(Debug)]
 enum PokerError {
     NoneError(&'static str),
-    BadInput(String),
+    UnknownRank(String),
+    UnknownSuit(char),
+    MissingData,
+    HandParsingError(String),
     ConversionError(std::array::TryFromSliceError),
 }
 
@@ -140,7 +145,10 @@ impl std::fmt::Display for PokerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PokerError::NoneError(s) => write!(f, "{}", s),
-            PokerError::BadInput(s) => write!(f, "{}", s),
+            PokerError::HandParsingError(s) => write!(f, "{}", s),
+            PokerError::UnknownRank(s) => write!(f, "Unknown rank: {}", s),
+            PokerError::UnknownSuit(s) => write!(f, "Unknown suit: {}", s),
+            PokerError::MissingData => write!(f, "Not enough data to create a hand"),
             PokerError::ConversionError(ref e) => e.fmt(f),
         }
     }
@@ -149,8 +157,8 @@ impl std::fmt::Display for PokerError {
 impl std::error::Error for PokerError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            PokerError::NoneError(_) | PokerError::BadInput(_) => None,
             PokerError::ConversionError(e) => Some(e),
+            _ => None,
         }
     }
 }
@@ -182,7 +190,9 @@ fn interpret_hand(mut cards: Vec<Card>) -> Result<HandRanking, PokerError> {
             let two_of = non_singles
                 .into_iter()
                 .find(|&(_, v)| v == 2)
-                .ok_or_else(|| PokerError::BadInput("no pair for this full house".to_string()))?
+                .ok_or_else(|| {
+                    PokerError::HandParsingError("no pair for this full house".to_string())
+                })?
                 .0;
             Ok(HandRanking::FullHouse(three_of, two_of))
         }
@@ -192,11 +202,11 @@ fn interpret_hand(mut cards: Vec<Card>) -> Result<HandRanking, PokerError> {
             let mut iter = v.into_iter();
             let small_pair = iter
                 .next()
-                .ok_or_else(|| PokerError::BadInput("no small rank in vec".to_string()))?
+                .ok_or_else(|| PokerError::HandParsingError("no small rank in vec".to_string()))?
                 .0;
             let large_pair = iter
                 .next()
-                .ok_or_else(|| PokerError::BadInput("no large rank in vec".to_string()))?
+                .ok_or_else(|| PokerError::HandParsingError("no large rank in vec".to_string()))?
                 .0;
             let spare_card = singles[0];
             Ok(HandRanking::TwoPair(large_pair, small_pair, spare_card))
@@ -208,14 +218,17 @@ fn interpret_hand(mut cards: Vec<Card>) -> Result<HandRanking, PokerError> {
         }
         (1, 3) => {
             let three_of = *highest_count.0;
-            let spare_cards = singles.as_slice().try_into()?;
-            Ok(HandRanking::ThreeOfAKind(three_of, spare_cards))
+            Ok(HandRanking::ThreeOfAKind(
+                three_of,
+                singles.as_slice().try_into()?,
+            ))
         }
         (1, 2) => {
             let pair_of = *highest_count.0;
-
-            let spare_cards = singles.as_slice().try_into()?;
-            Ok(HandRanking::OnePair(pair_of, spare_cards))
+            Ok(HandRanking::OnePair(
+                pair_of,
+                singles.as_slice().try_into()?,
+            ))
         }
         (0, _) => match (Hand::is_flush(&cards), Hand::is_straight(&cards)) {
             (true, true) => {
@@ -224,10 +237,7 @@ fn interpret_hand(mut cards: Vec<Card>) -> Result<HandRanking, PokerError> {
                     .ok_or_else(|| PokerError::NoneError("no high card in singles"))?;
                 Ok(HandRanking::StraightFlush(high_card))
             }
-            (true, false) => {
-                let singles = singles.as_slice().try_into()?;
-                Ok(HandRanking::Flush(singles))
-            }
+            (true, false) => Ok(HandRanking::Flush(singles.as_slice().try_into()?)),
             (false, true) => {
                 let is_aces_low_straight =
                     Some(&Rank::Two) == singles.first() && Some(&Rank::Ace) == singles.last();
@@ -240,12 +250,9 @@ fn interpret_hand(mut cards: Vec<Card>) -> Result<HandRanking, PokerError> {
                 };
                 Ok(HandRanking::Straight(high_card))
             }
-            (false, false) => {
-                let singles = singles.as_slice().try_into()?;
-                Ok(HandRanking::HighCard(singles))
-            }
+            (false, false) => Ok(HandRanking::HighCard(singles.as_slice().try_into()?)),
         },
-        _ => Err(PokerError::BadInput(format!(
+        _ => Err(PokerError::HandParsingError(format!(
             "wrong number of cards: {:?}",
             cards
         ))),
