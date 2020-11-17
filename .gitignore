@@ -6,3 +6,4 @@ stack.yaml
 stack.yaml.lock
 haskell/*/package.yaml
 *.cabal
+javascript/*/node_modules
